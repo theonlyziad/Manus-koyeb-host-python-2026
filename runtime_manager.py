@@ -11,6 +11,7 @@ from pathlib import Path
 ENTRYPOINTS = ("main.py", "bot.py", "app.py", "run.py", "index.py")
 MAX_REQUIREMENTS_BYTES = 256 * 1024
 IMPORT_TO_PACKAGE = {
+    "aiogram": "aiogram>=3.0,<4",
     "telegram": "python-telegram-bot>=21,<23",
     "pyrogram": "pyrogram==2.0.106",
     "TgCrypto": "TgCrypto>=1.2.5",

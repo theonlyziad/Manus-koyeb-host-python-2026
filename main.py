@@ -8,6 +8,7 @@ import sqlite3
 import hashlib
 import json
 import zipfile
+from html import escape
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -42,6 +43,42 @@ async def safe_edit_reply_markup(message: types.Message, **kwargs):
         if "message is not modified" in str(e):
             return None
         raise
+
+
+async def safe_callback_answer(callback: types.CallbackQuery, text: str | None = None, **kwargs):
+    """Answer a callback without crashing when Telegram has already expired it."""
+    try:
+        return await callback.answer(text, **kwargs)
+    except TelegramBadRequest as e:
+        if "query is too old" in str(e) or "query ID is invalid" in str(e):
+            logger.warning("Callback expired before answer: %s", e)
+            return None
+        raise
+
+
+def validate_uploaded_file(file_path: Path) -> None:
+    """Reject broken uploads before adding them to the user's file list."""
+    suffix = file_path.suffix.lower()
+    if suffix == ".py":
+        import py_compile
+        py_compile.compile(str(file_path), doraise=True)
+    elif suffix == ".js":
+        result = subprocess.run(
+            ["node", "--check", str(file_path)],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode != 0:
+            raise ValueError((result.stderr or result.stdout).strip() or "JavaScript syntax is invalid")
+    elif suffix == ".zip":
+        if not zipfile.is_zipfile(file_path):
+            raise ValueError("The uploaded ZIP file is corrupted")
+        max_archive_files = int(os.getenv("MAX_ARCHIVE_FILES", "100"))
+        with zipfile.ZipFile(file_path, "r") as archive:
+            infos = archive.infolist()
+            if len(infos) > max_archive_files:
+                raise ValueError(f"ZIP contains too many files (limit: {max_archive_files})")
+            for info in infos:
+                safe_user_path(file_path.parent, info.filename)
 
 
 TOKEN = os.getenv('BOT_TOKEN')
@@ -947,6 +984,19 @@ async def handle_document(message: types.Message):
         )
         
         await bot.download(document, destination=file_path)
+
+        try:
+            validate_uploaded_file(file_path)
+        except Exception as validation_error:
+            if file_path.exists():
+                file_path.unlink()
+            await safe_edit_text(
+                status_msg,
+                f"❌ <b>Upload rejected</b>\n\n📄 File: <code>{file_name}</code>\n"
+                f"⚠️ السبب: <code>{escape(str(validation_error)[:700])}</code>",
+                parse_mode="HTML",
+            )
+            return
         
         await safe_edit_text(status_msg, 
             f"💾 <b>Saving to database...</b>\n\n"
@@ -1025,29 +1075,33 @@ async def handle_document(message: types.Message):
 async def callback_run_script(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     file_name = callback.data.split(":", 1)[1]
+
+    # Telegram requires callback answers within a few seconds. Dependency
+    # installation can take minutes, so acknowledge the click immediately.
+    await safe_callback_answer(callback, "⏳ جاري تجهيز وتشغيل السكريبت...", show_alert=True)
     
     user_folder = UPLOAD_BOTS_DIR / str(user_id)
     try:
         file_path = safe_user_path(user_folder, file_name)
     except ValueError:
-        await callback.answer("❌ Invalid file path!", show_alert=True)
+        await callback.message.answer("❌ Invalid file path!")
         return
 
     if not file_path.exists():
-        await callback.answer("❌ File not found!", show_alert=True)
+        await callback.message.answer("❌ File not found!")
         return
 
     script_key = f"{user_id}_{file_name}"
     
     if script_key in bot_scripts:
-        await callback.answer("⚠️ Script is already running!", show_alert=True)
+        await callback.message.answer("⚠️ Script is already running!")
         return
     
     file_ext = file_path.suffix.lower()
     
     try:
         log_file_path = user_folder / f"{file_path.stem}.log"
-        log_file = open(log_file_path, 'w')
+        log_file = open(log_file_path, 'w+', buffering=1)
         
         entrypoint = find_entrypoint(file_path)
         command = await asyncio.to_thread(prepare_command, entrypoint, user_folder)
@@ -1077,7 +1131,20 @@ async def callback_run_script(callback: types.CallbackQuery):
         conn.close()
         bot_stats['total_runs'] = bot_stats.get('total_runs', 0) + 1
         
-        await callback.answer(f"✅ Script started! (PID: {process.pid})", show_alert=True)
+        # A script that exits immediately is not a successful host.
+        await asyncio.sleep(float(os.getenv("STARTUP_CHECK_SECONDS", "2")))
+        if process.poll() is not None:
+            log_file.flush()
+            log_file.seek(0)
+            error_tail = log_file.read()[-1200:]
+            log_file.close()
+            bot_scripts.pop(script_key, None)
+            raise RuntimeError(
+                "السكريبت توقف مباشرة بعد التشغيل. "
+                + (error_tail.strip() or f"exit code: {process.returncode}")
+            )
+
+        await callback.message.answer(f"✅ Script started successfully! (PID: {process.pid})")
         
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🛑 Stop Script", callback_data=f"stop_script:{script_key}")],
@@ -1088,8 +1155,11 @@ async def callback_run_script(callback: types.CallbackQuery):
         await callback.message.edit_reply_markup(reply_markup=keyboard)
         
     except Exception as e:
-        logger.error(f"Error running script: {e}")
-        await callback.answer(f"❌ Error: {str(e)}", show_alert=True)
+        logger.exception("Error running script")
+        await callback.message.answer(
+            f"❌ فشل تشغيل السكريبت:\n<code>{escape(str(e)[:2500])}</code>",
+            parse_mode="HTML",
+        )
 
 @dp.callback_query(F.data.startswith("stop_script:"))
 async def callback_stop_script(callback: types.CallbackQuery):
