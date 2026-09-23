@@ -91,7 +91,12 @@ def install_requirements(requirements: Path, runtime_dir: Path) -> Path:
     if not python_bin.exists() or not cached:
         if venv_dir.exists():
             shutil.rmtree(venv_dir)
-        subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True, timeout=120)
+        try:
+            subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True, timeout=120)
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            if venv_dir.exists():
+                shutil.rmtree(venv_dir)
+            subprocess.run([sys.executable, "-m", "virtualenv", "--no-download", str(venv_dir)], check=True, timeout=120)
         subprocess.run([str(python_bin), "-m", "pip", "install", "--upgrade", "pip", "wheel", "setuptools"], check=True, timeout=180)
         subprocess.run([str(python_bin), "-m", "pip", "install", "--no-cache-dir", "--disable-pip-version-check", "-r", str(requirements)], check=True, timeout=600)
         marker.write_text(digest, encoding="ascii")
