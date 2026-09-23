@@ -6,6 +6,8 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 ENTRYPOINTS = ("main.py", "bot.py", "app.py", "run.py", "index.py")
@@ -26,6 +28,7 @@ IMPORT_TO_PACKAGE = {
     "psutil": "psutil>=7,<8",
 }
 HOST_SECRET_NAMES = {"BOT_TOKEN", "OWNER_ID", "ADMIN_ID", "YOUR_USERNAME", "UPDATE_CHANNEL", "FORCE_CHANNEL"}
+INSTALL_LOCK = threading.Lock()
 
 
 def safe_path(root: Path, relative: str) -> Path:
@@ -84,24 +87,34 @@ def infer_requirements(entrypoint: Path) -> Path | None:
 
 
 def install_requirements(requirements: Path, runtime_dir: Path) -> Path:
-    digest = hashlib.sha256(requirements.read_bytes()).hexdigest()
-    venv_dir = runtime_dir / ".venv"
-    marker = runtime_dir / ".requirements.sha256"
-    python_bin = venv_dir / "bin" / "python"
-    cached = marker.is_file() and marker.read_text(encoding="ascii").strip() == digest
-    if not python_bin.exists() or not cached:
-        if venv_dir.exists():
-            shutil.rmtree(venv_dir)
-        try:
-            subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True, timeout=120)
-        except (subprocess.CalledProcessError, FileNotFoundError):
+    # Two Telegram clicks can reach this code concurrently. A shared lock
+    # prevents one request from deleting a venv while another is creating it.
+    with INSTALL_LOCK:
+        digest = hashlib.sha256(requirements.read_bytes()).hexdigest()
+        venv_dir = runtime_dir / ".venv"
+        marker = runtime_dir / ".requirements.sha256"
+        python_bin = venv_dir / "bin" / "python"
+        cached = marker.is_file() and marker.read_text(encoding="ascii").strip() == digest
+        if not python_bin.exists() or not cached:
+            runtime_dir.mkdir(parents=True, exist_ok=True)
             if venv_dir.exists():
-                shutil.rmtree(venv_dir)
-            subprocess.run([sys.executable, "-m", "virtualenv", "--no-download", str(venv_dir)], check=True, timeout=120)
-        subprocess.run([str(python_bin), "-m", "pip", "install", "--upgrade", "pip", "wheel", "setuptools"], check=True, timeout=180)
-        subprocess.run([str(python_bin), "-m", "pip", "install", "--no-cache-dir", "--disable-pip-version-check", "-r", str(requirements)], check=True, timeout=600)
-        marker.write_text(digest, encoding="ascii")
-    return python_bin
+                shutil.rmtree(venv_dir, ignore_errors=True)
+                for _ in range(10):
+                    if not venv_dir.exists():
+                        break
+                    time.sleep(0.2)
+                if venv_dir.exists():
+                    raise RuntimeError("تعذر تنظيف بيئة التشغيل القديمة؛ أعد المحاولة بعد لحظات")
+            try:
+                subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True, timeout=120)
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                if venv_dir.exists():
+                    shutil.rmtree(venv_dir, ignore_errors=True)
+                subprocess.run([sys.executable, "-m", "virtualenv", "--no-download", str(venv_dir)], check=True, timeout=120)
+            subprocess.run([str(python_bin), "-m", "pip", "install", "--upgrade", "pip", "wheel", "setuptools"], check=True, timeout=180)
+            subprocess.run([str(python_bin), "-m", "pip", "install", "--no-cache-dir", "--disable-pip-version-check", "-r", str(requirements)], check=True, timeout=600)
+            marker.write_text(digest, encoding="ascii")
+        return python_bin
 
 
 def prepare_command(entrypoint: Path, user_root: Path) -> list[str]:

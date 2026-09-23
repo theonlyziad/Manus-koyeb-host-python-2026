@@ -19,6 +19,8 @@
 
 أنشئ **Service واحدة فقط** من هذا المجلد، واختر Dockerfile:
 
+مهم: شغّل **نسخة واحدة فقط** من الـ Host وبنفس `BOT_TOKEN`. أوقف أي نسخة قديمة على Koyeb وأي تشغيل محلي أو Worker آخر يستعمل نفس التوكن، وإلا يظهر `TelegramConflictError` لأن Telegram يسمح بطلب polling واحد فقط.
+
 ```text
 Port: 8080
 Protocol: HTTP

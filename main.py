@@ -199,6 +199,7 @@ async def check_join_cb(call: types.CallbackQuery):
 
 
 bot_scripts = {}
+preparing_scripts = set()
 user_subscriptions = {}
 user_files = {}
 user_favorites = {}
@@ -1093,11 +1094,12 @@ async def callback_run_script(callback: types.CallbackQuery):
 
     script_key = f"{user_id}_{file_name}"
     
-    if script_key in bot_scripts:
+    if script_key in bot_scripts or script_key in preparing_scripts:
         await callback.message.answer("⚠️ Script is already running!")
         return
     
     file_ext = file_path.suffix.lower()
+    preparing_scripts.add(script_key)
     
     try:
         log_file_path = user_folder / f"{file_path.stem}.log"
@@ -1160,6 +1162,8 @@ async def callback_run_script(callback: types.CallbackQuery):
             f"❌ فشل تشغيل السكريبت:\n<code>{escape(str(e)[:2500])}</code>",
             parse_mode="HTML",
         )
+    finally:
+        preparing_scripts.discard(script_key)
 
 @dp.callback_query(F.data.startswith("stop_script:"))
 async def callback_stop_script(callback: types.CallbackQuery):
